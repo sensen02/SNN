@@ -19,40 +19,58 @@ print(f"模型: {sum(p.numel() for p in model.parameters())/1e6:.0f}M参数 | Mo
 print(f"训练Loss: {ckpt.get('epoch','?')} epoch | SR ~13%")
 print("=" * 60)
 
-def generate(prompt, max_new=15):
-    ids = [tokenizer.encode(prompt)]
+def generate(prompt, max_new=15, temperature=0.7, top_p=0.9, rep_penalty=1.2):
+    ids = tokenizer.encode(prompt)
     S = torch.zeros(1, C, M); V_ = torch.zeros(1, C, M)
     V_th = torch.full((1, C, M), 2.0); Ia = torch.zeros(1, C, M)
     Inmda = torch.zeros(1, C, M); I_psc = torch.zeros(1, nm)
-    W = model.precompute_W()
     ts = 0
-    for t in range(len(ids[0]) - 1):
-        token = torch.tensor([ids[0][t]], dtype=torch.long)
-        psc_hist = []
-        for st in range(4):
-            S, V_, V_th, Ia, Inmda = model.forward_step(S, V_, V_th, Ia, Inmda, token, ts, W)
-            Sm = S[:, ms:, :].reshape(1, -1)
-            I_psc = (1.0 - 1.0/3.0) * I_psc + Sm
-            psc_hist.append(I_psc); ts += 1
-        pooled = torch.stack(psc_hist).mean(dim=0)
-    logits = model.vocab_head(pooled)
-    next_id = logits[0].topk(1).indices.item()
-    ids[0].append(next_id)
-    output = prompt + tokenizer.decode([next_id])
-    for _ in range(max_new - 1):
-        token = torch.tensor([next_id], dtype=torch.long)
-        psc_hist = []
-        for st in range(4):
-            S, V_, V_th, Ia, Inmda = model.forward_step(S, V_, V_th, Ia, Inmda, token, ts, W)
-            Sm = S[:, ms:, :].reshape(1, -1)
-            I_psc = (1.0 - 1.0/3.0) * I_psc + Sm
-            psc_hist.append(I_psc); ts += 1
-        pooled = torch.stack(psc_hist).mean(dim=0)
-        logits = model.vocab_head(pooled)
-        next_id = logits[0].topk(1).indices.item()
-        c = tokenizer.decode([next_id])
-        output += c
-        if c == '' or len(output) > 300: break
+    def step(token_id):
+        nonlocal S, V_, V_th, Ia, Inmda, I_psc, ts
+        token = torch.tensor([[token_id]], dtype=torch.long)
+        S, V_, V_th, Ia, Inmda, I_psc, logits, _, _ = model(
+            S, V_, V_th, Ia, Inmda, I_psc, token, torch.tensor(ts)
+        )
+        ts += model.num_motor_pool_steps
+        return logits[0, -1]
+
+    generated_ids = []
+    with torch.no_grad():
+        for token_id in ids[:-1]:  # leave EOS unconsumed, as in training targets
+            logits = step(token_id)
+        
+        logits = logits / temperature
+        probs = torch.softmax(logits, dim=-1)
+        next_id = torch.multinomial(probs, num_samples=1).item()
+        output = prompt + tokenizer.decode([next_id])
+        generated_ids.append(next_id)
+        
+        for _ in range(max_new - 1):
+            logits = step(next_id)
+            
+            # Apply repetition penalty
+            for gid in set(generated_ids + ids):
+                logits[gid] /= rep_penalty
+                
+            logits = logits / temperature
+            
+            # Top-p sampling
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+            sorted_indices_to_remove[0] = 0
+            indices_to_remove = sorted_indices_to_remove.scatter(0, sorted_indices, sorted_indices_to_remove)
+            logits[indices_to_remove] = -float('Inf')
+            
+            probs = torch.softmax(logits, dim=-1)
+            next_id = torch.multinomial(probs, num_samples=1).item()
+            
+            generated_ids.append(next_id)
+            c = tokenizer.decode([next_id])
+            output += c
+            if c == '' or len(output) > 300:
+                break
     return output
 
 examples = [

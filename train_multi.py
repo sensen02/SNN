@@ -1,8 +1,24 @@
-import os, time, torch, torch.nn as nn, torch.optim as optim, torch.distributed as dist
+import os, time, torch, torch.nn as nn, torch.nn.functional as F, torch.optim as optim, torch.distributed as dist
 from contextlib import nullcontext
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from dataset import get_or_create_tokenizer, PackedChineseDataset
+
+
+class FocalLoss(nn.Module):
+    """Focal loss: down-weights easy negatives to fix class imbalance over large vocab"""
+    def __init__(self, gamma=2.0, ignore_index=-100, label_smoothing=0.0):
+        super().__init__()
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits, targets):
+        ce = F.cross_entropy(logits, targets, reduction='none',
+                             ignore_index=self.ignore_index,
+                             label_smoothing=self.label_smoothing)
+        pt = torch.exp(-ce)
+        return ((1 - pt) ** self.gamma * ce).mean()
 from srcn_model import SRCNv3_1B
 
 def train():
@@ -25,8 +41,8 @@ def train():
     lr_enc = 3e-4
     lr_w = 5e-5
     lr_w_wd = 5e-3
-    lr_mlp_out = 3e-4
-    lr_enc_head = 3e-4
+    lr_mlp_out = 1e-4
+    lr_enc_head = 1e-2
     grad_clip = 0.3
     save_interval = 1800  # 30 min
 
@@ -51,24 +67,28 @@ def train():
     motor_start = model.module.motor_start_col
     num_motor = model.module.num_motor_neurons
 
-    # 4 param groups: encoder, W_raw, MLP-input, MLP-output(frozen LR)
+    # 5 param groups: embedding(100x LR), encoder, W_raw, MLP-in, MLP-out
+    emb_params = []
     enc_params = []
     w_raw_params = []
     mlp_in_params = []
     mlp_out_params = []
     enc_head_params = []
     for name, param in model.named_parameters():
-        if 'W_raw' in name:
+        if 'encoder.embedding' in name:
+            emb_params.append(param)
+        elif 'W_raw' in name:
             w_raw_params.append(param)
         elif 'vocab_head.3' in name:
             mlp_out_params.append(param)
         elif 'vocab_head' in name:
             mlp_in_params.append(param)
-        elif 'encoder_head' in name:
+        elif 'encoder_head' in name or 'embedding_decoder' in name:
             enc_head_params.append(param)
         else:
             enc_params.append(param)
     opt = optim.AdamW([
+        {'params': emb_params, 'lr': 0.03, 'weight_decay': 1e-4},
         {'params': enc_params, 'lr': lr_enc, 'weight_decay': 1e-4},
         {'params': w_raw_params, 'lr': lr_w, 'weight_decay': lr_w_wd},
         {'params': mlp_in_params, 'lr': lr, 'weight_decay': 0.0},
@@ -76,9 +96,9 @@ def train():
         {'params': enc_head_params, 'lr': lr_enc_head, 'weight_decay': 0.0},
     ])
     if rank == 0:
-        print(f"LR: enc={lr_enc}, enc_head={lr_enc_head}, mlp_in={lr}, mlp_out={lr_mlp_out}, W_raw={lr_w}(wd={lr_w_wd})")
+        print(f"LR: emb=0.03, enc={lr_enc}, enc_head={lr_enc_head}, mlp_in={lr}, mlp_out={lr_mlp_out}, W_raw={lr_w}(wd={lr_w_wd})")
 
-    criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_id)
+    criterion = FocalLoss(gamma=1.0, ignore_index=tokenizer.pad_id, label_smoothing=0.1)
 
     # ===== NEVER DELETE checkpoint.pt =====
     # Auto-resume on restart. Crash-safe.
@@ -92,7 +112,7 @@ def train():
         opt.load_state_dict(ckpt["optimizer"])
         # Checkpoint optimizer state contains the old shortcut-dominated LRs.
         # Restore the balanced schedule explicitly after loading it.
-        for group, group_lr in zip(opt.param_groups, [lr_enc, lr_w, lr, lr_mlp_out, lr_enc_head]):
+        for group, group_lr in zip(opt.param_groups, [0.03, lr_enc, lr_w, lr, lr_mlp_out, lr_enc_head]):
             group["lr"] = group_lr
         start_epoch = ckpt["epoch"]
         start_batch = ckpt.get("batch_idx", 0)
@@ -141,11 +161,12 @@ def train():
                 # DDP requires the forward pass itself to be inside no_sync().
                 sync_context = model.no_sync() if wi < len(t_ranges) - 1 else nullcontext()
                 with sync_context:
-                    S, V, V_th, I_ampa, I_nmda, I_psc, logits, spikes_sum = model(
+                    S, V, V_th, I_ampa, I_nmda, I_psc, logits, spikes_sum, loss_emb = model(
                         S, V, V_th, I_ampa, I_nmda, I_psc, win_tokens,
                         torch.tensor(t_start, device=device),
                     )
-                    loss = criterion(logits.view(-1, V_size), target.reshape(-1))
+                    loss_vocab = criterion(logits.view(-1, V_size), target.reshape(-1))
+                    loss = loss_vocab + 1.0 * loss_emb  # combine vocab + embedding reconstruction
                     if torch.isfinite(loss):
                         scaled_loss = loss * (num_win_tokens / (seq_len - 1))
                         scaled_loss.backward()

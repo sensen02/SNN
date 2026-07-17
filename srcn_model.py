@@ -132,6 +132,8 @@ class SRCNv3_1B(nn.Module):
         )
         # Encoder readout: maps to MLP hidden dim (no class imbalance)
         self.encoder_head = nn.Linear(embed_dim, 4096, bias=False)
+        # Embedding reconstruction: forces encoder features (detached target)
+        self.embedding_decoder = nn.Linear(4096, embed_dim, bias=False)
 
     @property
     def device(self):
@@ -176,15 +178,19 @@ class SRCNv3_1B(nn.Module):
 
         window_pooled = torch.stack(pooled_list, dim=1)
         window_enc = torch.stack(enc_list, dim=1)
-        # Recurrent path: motor → hidden (before ReLU)
-        motor_input = self.vocab_head[0](window_pooled + window_enc)  # LayerNorm
-        motor_hidden = self.vocab_head[1](motor_input)                # Linear1 (B,T,4096)
+        emb_tokens = torch.stack(emb_list, dim=1)  # (B,T,512)
+        # Recurrent path: motor → hidden (with ReLU)
+        motor_hidden = self.vocab_head[:3](window_pooled)  # Removed + window_enc shortcut  # LN→L1→ReLU (B,T,4096)
         # Encoder path: embedding → hidden (same 4096-dim, no class imbalance)
-        enc_hidden = self.encoder_head(torch.stack(emb_list, dim=1))  # (B,T,4096)
-        # Combine and classify
-        combined = torch.relu(motor_hidden + enc_hidden)
+        enc_hidden = self.encoder_head(emb_tokens)     # (B,T,4096)
+        # Embedding reconstruction loss: force encoder to preserve input information
+        # Target detached → embedding must be reconstructable, not just movable
+        emb_recon = self.embedding_decoder(enc_hidden)  # (B,T,512)
+        loss_emb = torch.nn.functional.mse_loss(emb_recon, emb_tokens.detach())
+        # Combine encoder + recurrent at hidden layer (no class imbalance)
+        combined = motor_hidden  # Removed + 0.2 * enc_hidden shortcut
         logits = self.vocab_head[3](combined)  # Linear2 → (B,T,8455)
-        return S, V, V_th, I_ampa, I_nmda, I_psc, logits, spikes_sum
+        return S, V, V_th, I_ampa, I_nmda, I_psc, logits, spikes_sum, loss_emb
 
     def forward_token_with_psc(self, S, V, V_th, I_ampa, I_nmda, I_psc, token, t_start_tensor, W_fp16):
         psc_hist = []
