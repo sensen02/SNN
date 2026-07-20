@@ -217,11 +217,29 @@ def train():
             # Periodic checkpoint
             if rank == 0 and time.time() - last_save_time > save_interval:
                 epoch_ckpt_path = os.path.join(script_dir, f"checkpoint_e{epoch+1}_b{batch_idx+1}.pt")
-                torch.save({"model": model.module.state_dict(), "optimizer": opt.state_dict(),
-                            "epoch": epoch, "batch_idx": batch_idx + 1}, epoch_ckpt_path)
-                # STRICT BACKUP ISOLATION: Never overwrite checkpoint.pt automatically
+                # Save to temporary file first
+                tmp_path = f"{epoch_ckpt_path}.tmp"
+                torch.save({
+                    'epoch': epoch,
+                    'batch_idx': batch_idx + 1,
+                    'model': model.module.state_dict(),
+                    'optimizer': opt.state_dict(),
+                }, tmp_path)
+                # Rename to final path
+                os.replace(tmp_path, epoch_ckpt_path)
                 last_save_time = time.time()
-                print(f"  [Checkpoint saved at {time.time()-t0:.0f}s] E{epoch+1}B{batch_idx+1} -> {epoch_ckpt_path}")
+                print(f"  [Checkpoint saved at {int(time.time() - t0)}s] E{epoch+1}B{batch_idx+1} -> {epoch_ckpt_path}")
+                
+                # Auto-cleanup old checkpoints (Only clean mid-epoch checkpoints, keep final epoch checkpoints)
+                try:
+                    # Keep all _final.pt checkpoints. Only target _bXXX.pt intra-epoch checkpoints
+                    ckpt_files = [f for f in os.listdir(script_dir) if f.startswith('checkpoint_e') and f.endswith('.pt') and '_b' in f]
+                    ckpt_files.sort(key=lambda x: os.path.getmtime(os.path.join(script_dir, x)))
+                    while len(ckpt_files) > 3: # Keep latest 3 intra-epoch backups + ALL epoch finals
+                        old_ckpt = ckpt_files.pop(0)
+                        os.remove(os.path.join(script_dir, old_ckpt))
+                except Exception as e:
+                    print(f"  [!] Failed to clean up old checkpoints: {e}")
 
             # Defragment CUDA allocator every 100 batches
             if batch_idx > 0 and batch_idx % 100 == 0:
@@ -231,10 +249,24 @@ def train():
         if rank == 0:
             print(f"\n=== Epoch {epoch+1} done | Avg loss: {avg_epoch:.4f} | Elapsed: {time.time()-t0:.0f}s ===\n")
             epoch_ckpt_path = os.path.join(script_dir, f"checkpoint_e{epoch+1}_final.pt")
-            torch.save({"model": model.module.state_dict(), "optimizer": opt.state_dict(),
-                        "epoch": epoch, "batch_idx": 0}, epoch_ckpt_path)
-            # STRICT BACKUP ISOLATION: Never overwrite checkpoint.pt automatically
+            tmp_path = f"{epoch_ckpt_path}.tmp"
+            torch.save({
+                "model": model.module.state_dict(),
+                "optimizer": opt.state_dict(),
+                "epoch": epoch,
+                "batch_idx": 0
+            }, tmp_path)
+            os.replace(tmp_path, epoch_ckpt_path)
             last_save_time = time.time()
+            # Auto-cleanup for final epoch checkpoints: keep the last 3 epochs
+            try:
+                epoch_files = [f for f in os.listdir(script_dir) if f.startswith('checkpoint_e') and f.endswith('_final.pt')]
+                epoch_files.sort(key=lambda x: os.path.getmtime(os.path.join(script_dir, x)))
+                while len(epoch_files) > 3: # Keep latest 3 epoch final checkpoints
+                    old_ckpt = epoch_files.pop(0)
+                    os.remove(os.path.join(script_dir, old_ckpt))
+            except Exception as e:
+                print(f"  [!] Failed to clean up epoch checkpoints: {e}")
         start_batch = 0  # Ensure start_batch is reset if the previous epoch was completed early or skipped
 
     dist.destroy_process_group()
