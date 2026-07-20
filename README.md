@@ -1,3 +1,11 @@
+#出了点问题 不要看了,模型走了捷径,在修复中!
+
+
+
+
+
+
+
 # SRCN v2 — Spiking Recurrent Columnar Network for Chinese Language Modeling
 
 **414M 参数脉冲神经网络**，在 4×RTX 3090 上的字符级中文语言模型。
