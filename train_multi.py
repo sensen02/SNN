@@ -51,7 +51,14 @@ def train():
     tokenizer = get_or_create_tokenizer(corpus, os.path.join(script_dir, "vocab_tokenizer_v3.pkl"))
     V_size = tokenizer.vocab_size
 
-    dataset = PackedChineseDataset(corpus, tokenizer, chunk_len=seq_len, cache_path=os.path.join(script_dir, "packed_dataset_340m.pkl"))
+    # Load dataset using memmap for massive scale
+    dataset = PackedChineseDataset(
+        corpus_path='/home/linux/srcn_v2_balanced/annotated_corpus.jsonl',
+        tokenizer=tokenizer,
+        chunk_len=seq_len,
+        cache_path='/home/linux/srcn_v2_balanced/packed_dataset_340m.pkl',
+        bin_path='/data/massive_corpus/skypile_massive.bin'
+    )
     sampler = DistributedSampler(dataset, shuffle=True)
     loader = DataLoader(dataset, batch_size=B, sampler=sampler, drop_last=True, num_workers=2, pin_memory=True)
     if rank == 0:
