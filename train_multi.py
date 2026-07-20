@@ -39,7 +39,7 @@ def train():
     pool_steps = 4
     lr = 3e-4
     lr_enc = 3e-4
-    lr_w = 5e-5
+    lr_w = 1.2e-4
     lr_w_wd = 5e-3
     lr_mlp_out = 1e-4
     lr_enc_head = 1e-2
@@ -174,10 +174,13 @@ def train():
                 total_steps += num_win_tokens * pool_steps
                 window_loss += loss.item()
                 n_windows += 1
-                if not torch.isfinite(loss):
+                if not torch.isfinite(loss) or loss.item() > 20.0:
                     batch_valid = False
                     if rank == 0:
-                        print(f"  [!] NaN/Inf at E{epoch+1}B{batch_idx+1:04d} W{wi}")
+                        if not torch.isfinite(loss):
+                            print(f"  [!] NaN/Inf at E{epoch+1}B{batch_idx+1:04d} W{wi}")
+                        else:
+                            print(f"  [!] Loss explosion ({loss.item():.2f} > 20.0) at E{epoch+1}B{batch_idx+1:04d} W{wi}")
                     break
                 S, V, V_th, I_ampa, I_nmda, I_psc = [x.detach() for x in [S, V, V_th, I_ampa, I_nmda, I_psc]]
 
@@ -206,10 +209,12 @@ def train():
 
             # Periodic checkpoint
             if rank == 0 and time.time() - last_save_time > save_interval:
+                epoch_ckpt_path = os.path.join(script_dir, f"checkpoint_e{epoch+1}_b{batch_idx+1}.pt")
                 torch.save({"model": model.module.state_dict(), "optimizer": opt.state_dict(),
-                            "epoch": epoch, "batch_idx": batch_idx + 1}, ckpt_path)
+                            "epoch": epoch, "batch_idx": batch_idx + 1}, epoch_ckpt_path)
+                # STRICT BACKUP ISOLATION: Never overwrite checkpoint.pt automatically
                 last_save_time = time.time()
-                print(f"  [Checkpoint saved at {time.time()-t0:.0f}s] E{epoch+1}B{batch_idx+1}")
+                print(f"  [Checkpoint saved at {time.time()-t0:.0f}s] E{epoch+1}B{batch_idx+1} -> {epoch_ckpt_path}")
 
             # Defragment CUDA allocator every 100 batches
             if batch_idx > 0 and batch_idx % 100 == 0:
@@ -218,8 +223,10 @@ def train():
         avg_epoch = epoch_loss / max(n_batches, 1)
         if rank == 0:
             print(f"\n=== Epoch {epoch+1} done | Avg loss: {avg_epoch:.4f} | Elapsed: {time.time()-t0:.0f}s ===\n")
+            epoch_ckpt_path = os.path.join(script_dir, f"checkpoint_e{epoch+1}_final.pt")
             torch.save({"model": model.module.state_dict(), "optimizer": opt.state_dict(),
-                        "epoch": epoch, "batch_idx": 0}, ckpt_path)
+                        "epoch": epoch, "batch_idx": 0}, epoch_ckpt_path)
+            # STRICT BACKUP ISOLATION: Never overwrite checkpoint.pt automatically
             last_save_time = time.time()
         start_batch = 0  # Ensure start_batch is reset if the previous epoch was completed early or skipped
 
