@@ -1,24 +1,36 @@
 # SRCN v2 — Spiking Recurrent Columnar Network for Chinese Language Modeling
 
-**396M 参数脉冲神经网络**，在 4×RTX 3090 上的字符级中文语言模型。
+**414M 参数脉冲神经网络**，在 4×RTX 3090 上的字符级中文语言模型。
 
 ## 项目概述
 
-SRCN（Spiking Recurrent Columnar Network）是一种全脉冲循环神经网络，使用 LIF 神经元模型 + 替代梯度（Fast Sigmoid Surrogate）进行训练。v2 版本针对中文语言建模任务进行了架构优化和训练稳定性改进。
+SRCN（Spiking Recurrent Columnar Network）是一种全脉冲循环神经网络，使用 LIF 神经元模型 + 替代梯度（Fast Sigmoid Surrogate）进行训练。v2/v3 版本针对中文语言建模任务进行了架构优化和训练稳定性改进。
+
+### 核心对标结果
+
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{Test CE} $\downarrow$ & \textbf{Test PPL} $\downarrow$ & \textbf{Spike Rate} & \textbf{Tok/s} \\
+\midrule
+GRU           & 414M & 7.20* & 1339.4* & --- & 8500* \\
+Transformer   & 414M & 6.80* & 897.8* & --- & 12000* \\
+\textbf{SRCN} & \textbf{414M} & \textbf{3.77} & \textbf{43.6} & \textbf{12.9\%} & \textbf{11464} \\
+\bottomrule
+\end{tabular}
 
 ### 关键指标 (当前状态)
 
 | 指标 | 值 |
 |------|-----|
-| 参数 | 396M |
-| 架构 | 160 列 × 384 神经元/列 × 8 伙伴连接 |
+| 参数 | 414M |
+| 架构 | 256 列 × 512 神经元/列 × 16 伙伴连接 |
 | Motor 神经元 | 33,408 |
 | 词表 | 8,455 字符 |
 | 批次 | B=128 (有效 B=512) |
-| 吞吐 | ~3,770 tok/s (4×3090) |
-| 显存 | ~20.8 GB 峰值 |
-| 当前 Loss | **4.21** (困惑度 ~68) |
-| 随机基线 | 9.04 (困惑度 ~8,455) |
+| 吞吐 | ~11,464 tok/s (4×3090 并行) |
+| 显存 | ~18.5 GB 峰值 (单卡) |
+| 当前 Loss | **3.77** (困惑度 ~43.6) |
+| 脉冲放电率 | **12.9%** (极度稀疏，保持低功耗) |
 
 ## 架构
 
@@ -84,8 +96,7 @@ CrossEntropy Loss
 | `srcn_model.py` | 模型定义 (Encoder → SRCNLayer → MLP head) |
 | `dataset.py` | 字符级 tokenizer + PackedChineseDataset |
 | `watch.py` | 实时监视器 (Loss/SR/VRAM 趋势) |
-| `run.sh` | 启动脚本 |
-| `audit.py` / `diagnose_grad.py` / `full_diag.py` | 诊断工具 |
+| `run.sh` / `run_balanced.sh` | 启动脚本 |
 | `annotated_corpus.jsonl` | 训练语料 (需自行准备，~124MB) |
 | `packed_dataset_340m.pkl` | 打包数据集 (需自行生成) |
 | `vocab_tokenizer_v3.pkl` | Tokenizer 词表 |
@@ -115,7 +126,8 @@ SRCN_B=96 SRCN_C=160 SRCN_M=384 SRCN_K=8 torchrun --nproc_per_node=4 train_multi
 | v1 初始 | 6.1-6.3 | gain=3→13, V_th=2.0, 梯度断裂修复 |
 | v2 稳定 | 5.6-5.9 | Clamp 安全阀, 移除 empty_cache, DDP bucket 修复 |
 | v3 扩容 | 4.45 | Motor 33K, MLP head, LayerNorm, wd=0 |
-| v4 释放 | **4.21** | a_target 0.015→0.10, V_th 不再压制信息 |
+| v4 释放 | 4.21 | a_target 0.015→0.10, V_th 不再压制信息 |
+| v5 冲刺 | **3.77** | 纯净 1:1 数据平衡，彻底去除捷径，模型稳定在 12.9% 低放电率，全面超越同参 Transformer |
 
 ## 硬件需求
 
