@@ -119,15 +119,7 @@ python3 watch.py
 SRCN_B=96 SRCN_C=160 SRCN_M=384 SRCN_K=8 torchrun --nproc_per_node=4 train_multi.py
 ```
 
-## 训练历史
 
-| 阶段 | Loss | 关键改动 |
-|------|------|---------|
-| v1 初始 | 6.1-6.3 | gain=3→13, V_th=2.0, 梯度断裂修复 |
-| v2 稳定 | 5.6-5.9 | Clamp 安全阀, 移除 empty_cache, DDP bucket 修复 |
-| v3 扩容 | 4.45 | Motor 33K, MLP head, LayerNorm, wd=0 |
-| v4 释放 | 4.21 | a_target 0.015→0.10, V_th 不再压制信息 |
-| v5 冲刺 | **3.77** | 纯净 1:1 数据平衡，彻底去除捷径，模型稳定在 12.9% 低放电率，全面超越同参 Transformer |
 
 ## 硬件需求
 
