@@ -3,15 +3,16 @@ from torch.utils.data import Dataset
 import json
 import os
 import pickle
+import numpy as np
 
 class CharTokenizer:
     def __init__(self, char_list):
-        self.vocab = ["<pad>", "<bos>", "<eos>"] + char_list
+        self.vocab = ['<pad>', '<bos>', '<eos>'] + char_list
         self.char_to_id = {c: i for i, c in enumerate(self.vocab)}
         self.id_to_char = {i: c for i, c in enumerate(self.vocab)}
-        self.pad_id = self.char_to_id["<pad>"]
-        self.bos_id = self.char_to_id["<bos>"]
-        self.eos_id = self.char_to_id["<eos>"]
+        self.pad_id = self.char_to_id['<pad>']
+        self.bos_id = self.char_to_id['<bos>']
+        self.eos_id = self.char_to_id['<eos>']
         
     def encode(self, text, add_bos=True, add_eos=True):
         ids = [self.char_to_id[c] for c in text if c in self.char_to_id]
@@ -24,7 +25,7 @@ class CharTokenizer:
     def decode(self, ids):
         if isinstance(ids, torch.Tensor):
             ids = ids.tolist()
-        return "".join([self.id_to_char[i] for i in ids if i not in [self.pad_id, self.bos_id, self.eos_id]])
+        return ''.join([self.id_to_char[i] for i in ids if i not in [self.pad_id, self.bos_id, self.eos_id]])
 
     @property
     def vocab_size(self):
@@ -33,20 +34,20 @@ class CharTokenizer:
 def get_or_create_tokenizer(corpus_path, vocab_cache_path):
     if os.path.exists(vocab_cache_path):
         try:
-            with open(vocab_cache_path, "rb") as f:
+            with open(vocab_cache_path, 'rb') as f:
                 tokenizer = pickle.load(f)
-            print(f"Loaded cached tokenizer with vocab size {tokenizer.vocab_size}")
+            print(f'Loaded cached tokenizer with vocab size {tokenizer.vocab_size}')
             return tokenizer
         except Exception as e:
-            print(f"Failed to load cached tokenizer: {e}. Rebuilding...")
+            print(f'Failed to load cached tokenizer: {e}. Rebuilding...')
 
-    print("Building tokenizer from corpus...")
+    print('Building tokenizer from corpus...')
     vocab = set()
-    with open(corpus_path, "r", encoding="utf-8") as f:
+    with open(corpus_path, 'r', encoding='utf-8') as f:
         for line in f:
             try:
                 data = json.loads(line)
-                text = data.get("text", "")
+                text = data.get('text', '')
                 for char in text:
                     vocab.add(char)
             except:
@@ -55,39 +56,46 @@ def get_or_create_tokenizer(corpus_path, vocab_cache_path):
     tokenizer = CharTokenizer(char_list)
     
     os.makedirs(os.path.dirname(vocab_cache_path), exist_ok=True)
-    with open(vocab_cache_path, "wb") as f:
+    with open(vocab_cache_path, 'wb') as f:
         pickle.dump(tokenizer, f)
-    print(f"Created tokenizer with vocab size {tokenizer.vocab_size}")
+    print(f'Created tokenizer with vocab size {tokenizer.vocab_size}')
     return tokenizer
 
 class PackedChineseDataset(Dataset):
-    def __init__(self, corpus_path, tokenizer, chunk_len=512, cache_path=None):
+    def __init__(self, corpus_path, tokenizer, chunk_len=512, cache_path=None, bin_path=None):
         self.chunk_len = chunk_len
+        self.bin_path = bin_path
         
+        if self.bin_path and os.path.exists(self.bin_path):
+            print(f'Loading memory-mapped binary dataset from {self.bin_path}...')
+            self.mmap_data = np.memmap(self.bin_path, dtype=np.uint16, mode='r')
+            self.num_chunks = len(self.mmap_data) // chunk_len
+            print(f'Mapped dataset with {len(self.mmap_data):,} tokens ({self.num_chunks:,} chunks).')
+            return
+            
         if cache_path and os.path.exists(cache_path):
             try:
-                print(f"Loading cached dataset from {cache_path}...")
-                with open(cache_path, "rb") as f:
+                print(f'Loading cached dataset from {cache_path}...')
+                with open(cache_path, 'rb') as f:
                     self.chunks = pickle.load(f)
-                print(f"Loaded {len(self.chunks)} packed chunks.")
+                print(f'Loaded {len(self.chunks)} packed chunks.')
                 return
             except Exception as e:
-                print(f"Failed to load cached dataset: {e}. Rebuilding...")
+                print(f'Failed to load cached dataset: {e}. Rebuilding...')
             
-        print("Tokenizing corpus and packing into chunks...")
+        print('Tokenizing corpus and packing into chunks...')
         all_ids = []
-        with open(corpus_path, "r", encoding="utf-8") as f:
+        with open(corpus_path, 'r', encoding='utf-8') as f:
             for line in f:
                 try:
                     data = json.loads(line)
-                    text = data.get("text", "")
+                    text = data.get('text', '')
                     if text:
                         ids = tokenizer.encode(text, add_bos=True, add_eos=True)
                         all_ids.extend(ids)
                 except:
                     pass
         
-        # Split into chunks of chunk_len
         num_chunks = len(all_ids) // chunk_len
         if num_chunks == 0:
             padding = [tokenizer.pad_id] * (chunk_len - len(all_ids))
@@ -101,12 +109,17 @@ class PackedChineseDataset(Dataset):
                 
         if cache_path:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            with open(cache_path, "wb") as f:
+            with open(cache_path, 'wb') as f:
                 pickle.dump(self.chunks, f)
-            print(f"Saved cached dataset with {len(self.chunks)} chunks to {cache_path}")
+            print(f'Saved cached dataset with {len(self.chunks)} chunks to {cache_path}')
             
     def __len__(self):
+        if self.bin_path and os.path.exists(self.bin_path):
+            return self.num_chunks
         return len(self.chunks)
         
     def __getitem__(self, idx):
+        if self.bin_path and os.path.exists(self.bin_path):
+            chunk = self.mmap_data[idx * self.chunk_len : (idx + 1) * self.chunk_len].astype(np.int64)
+            return torch.tensor(chunk, dtype=torch.long)
         return self.chunks[idx]

@@ -37,12 +37,13 @@ def train():
     seq_len = 512
     bptt_steps = 32
     pool_steps = 4
-    lr = 3e-4
-    lr_enc = 3e-4
-    lr_w = 1.2e-4
+    # Stabilized Learning Rates (Reduced by 5x to guarantee absolute stability for long-term training)
+    lr = 0.00006
+    lr_enc = 0.00006
+    lr_w = 0.000024
     lr_w_wd = 5e-3
-    lr_mlp_out = 1e-4
-    lr_enc_head = 1e-2
+    lr_mlp_out = 0.00002
+    lr_enc_head = 0.002
     grad_clip = 0.3
     save_interval = 1800  # 30 min
 
@@ -95,7 +96,7 @@ def train():
         else:
             enc_params.append(param)
     opt = optim.AdamW([
-        {'params': emb_params, 'lr': 0.03, 'weight_decay': 1e-4},
+        {'params': emb_params, 'lr': 0.006, 'weight_decay': 1e-4},
         {'params': enc_params, 'lr': lr_enc, 'weight_decay': 1e-4},
         {'params': w_raw_params, 'lr': lr_w, 'weight_decay': lr_w_wd},
         {'params': mlp_in_params, 'lr': lr, 'weight_decay': 0.0},
@@ -103,7 +104,7 @@ def train():
         {'params': enc_head_params, 'lr': lr_enc_head, 'weight_decay': 0.0},
     ])
     if rank == 0:
-        print(f"LR: emb=0.03, enc={lr_enc}, enc_head={lr_enc_head}, mlp_in={lr}, mlp_out={lr_mlp_out}, W_raw={lr_w}(wd={lr_w_wd})")
+        print(f"LR: emb=0.006, enc={lr_enc}, enc_head={lr_enc_head}, mlp_in={lr}, mlp_out={lr_mlp_out}, W_raw={lr_w}(wd={lr_w_wd})")
 
     criterion = FocalLoss(gamma=1.0, ignore_index=tokenizer.pad_id, label_smoothing=0.1)
 
@@ -116,11 +117,15 @@ def train():
     if os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
         model.module.load_state_dict(ckpt["model"])
-        opt.load_state_dict(ckpt["optimizer"])
-        # Checkpoint optimizer state contains the old shortcut-dominated LRs.
-        # Restore the balanced schedule explicitly after loading it.
-        for group, group_lr in zip(opt.param_groups, [0.03, lr_enc, lr_w, lr, lr_mlp_out, lr_enc_head]):
-            group["lr"] = group_lr
+        if "optimizer" in ckpt:
+            opt.load_state_dict(ckpt["optimizer"])
+            # Checkpoint optimizer state contains the old shortcut-dominated LRs.
+            # Restore the balanced schedule explicitly after loading it.
+            for group, group_lr in zip(opt.param_groups, [0.006, lr_enc, lr_w, lr, lr_mlp_out, lr_enc_head]):
+                group["lr"] = group_lr
+        else:
+            if rank == 0:
+                print("No optimizer state found in checkpoint, starting with fresh optimizer (cleared momentum).")
         start_epoch = ckpt["epoch"]
         start_batch = ckpt.get("batch_idx", 0)
         if rank == 0:
@@ -216,7 +221,7 @@ def train():
 
             # Periodic checkpoint
             if rank == 0 and time.time() - last_save_time > save_interval:
-                epoch_ckpt_path = os.path.join(script_dir, f"checkpoint_e{epoch+1}_b{batch_idx+1}.pt")
+                epoch_ckpt_path = os.path.join(script_dir, "checkpoint.pt")
                 # Save to temporary file first
                 tmp_path = f"{epoch_ckpt_path}.tmp"
                 torch.save({
@@ -229,17 +234,6 @@ def train():
                 os.replace(tmp_path, epoch_ckpt_path)
                 last_save_time = time.time()
                 print(f"  [Checkpoint saved at {int(time.time() - t0)}s] E{epoch+1}B{batch_idx+1} -> {epoch_ckpt_path}")
-                
-                # Auto-cleanup old checkpoints (Only clean mid-epoch checkpoints, keep final epoch checkpoints)
-                try:
-                    # Keep all _final.pt checkpoints. Only target _bXXX.pt intra-epoch checkpoints
-                    ckpt_files = [f for f in os.listdir(script_dir) if f.startswith('checkpoint_e') and f.endswith('.pt') and '_b' in f]
-                    ckpt_files.sort(key=lambda x: os.path.getmtime(os.path.join(script_dir, x)))
-                    while len(ckpt_files) > 3: # Keep latest 3 intra-epoch backups + ALL epoch finals
-                        old_ckpt = ckpt_files.pop(0)
-                        os.remove(os.path.join(script_dir, old_ckpt))
-                except Exception as e:
-                    print(f"  [!] Failed to clean up old checkpoints: {e}")
 
             # Defragment CUDA allocator every 100 batches
             if batch_idx > 0 and batch_idx % 100 == 0:
@@ -257,12 +251,14 @@ def train():
                 "batch_idx": 0
             }, tmp_path)
             os.replace(tmp_path, epoch_ckpt_path)
+            import shutil
+            shutil.copy(epoch_ckpt_path, os.path.join(script_dir, "checkpoint.pt"))
             last_save_time = time.time()
-            # Auto-cleanup for final epoch checkpoints: keep the last 3 epochs
+            # Keep exactly the last 2 epoch checkpoints (epoch-1 and epoch-2)
             try:
                 epoch_files = [f for f in os.listdir(script_dir) if f.startswith('checkpoint_e') and f.endswith('_final.pt')]
                 epoch_files.sort(key=lambda x: os.path.getmtime(os.path.join(script_dir, x)))
-                while len(epoch_files) > 3: # Keep latest 3 epoch final checkpoints
+                while len(epoch_files) > 2: # Keep latest 2 epoch final checkpoints
                     old_ckpt = epoch_files.pop(0)
                     os.remove(os.path.join(script_dir, old_ckpt))
             except Exception as e:
